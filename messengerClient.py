@@ -91,6 +91,14 @@ class MessengerClient:
             raise Exception('Cannot skip more than' + self.max_skip + 'messages')
         else:
             while(self.conn[username]['Nr'] < until):
+
+                # osigurava prostornu slozenost O(1) - brise najstariji message_key ako ih cuva vise od max_skip
+                if(len(self.conn[username]['MKSKIPPED']) >= self.max_skip):
+                    for i in range(0, until):
+                        if(i in self.conn[username]['MKSKIPPED']):
+                            del self.conn[username]['MKSKIPPED'][i]
+                            break
+
                 hkdf = HKDF(
                     algorithm=hashes.SHA256(),
                     length=32 * 2,
