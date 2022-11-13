@@ -76,6 +76,34 @@ class MessengerClient:
         self.conn[username]['Ns'] += 1
         return header, aesgcm.encrypt(nonce, bytes(message, 'utf-8'), None)
 
+    def try_skipped_keys(self, username, message):
+        header = message[0]
+        if header['Ns'] in self.conn[username]['MKSKIPPED']:
+            mk = self.conn[username]['MKSKIPPED'][header['Ns']]
+            del self.conn[username]['MKSKIPPED'][header['Ns']]
+            aesgcm = AESGCM(mk)
+            return aesgcm.decrypt(header['nonce'], message[1], None).decode('utf-8')
+        else:
+            return None
+
+    def skip_message_keys(self, username, until):
+        if self.conn[username]['Nr'] + self.max_skip < until:
+            raise Exception('Cannot skip more than' + self.max_skip + 'messages')
+        else:
+            while(self.conn[username]['Nr'] < until):
+                hkdf = HKDF(
+                    algorithm=hashes.SHA256(),
+                    length=32 * 2,
+                    salt=self.salt,
+                    info=self.info,
+                )
+                key = hkdf.derive(self.conn[username]['CKr'])
+                chain_key = key[32:]
+                message_key = key[:32]
+                self.conn[username]['CKr'] = chain_key
+                self.conn[username]['MKSKIPPED'][self.conn[username]['Nr']] = message_key
+                self.conn[username]['Nr'] += 1
+
     def receive_message(self, username, message):
         """ Receive a message from a user
 
@@ -90,8 +118,13 @@ class MessengerClient:
         Returns a plaintext (str)
 
         """
-        CKr_old = self.conn[username]['CKr']
+        header = message[0]
+        plaintext = self.try_skipped_keys(username, message)
+        if plaintext != None:
+            return plaintext
+        self.skip_message_keys(username, header['Ns'])
 
+        CKr_old = self.conn[username]['CKr']
         hkdf = HKDF(
             algorithm=hashes.SHA256(),
             length=32 * 2,
