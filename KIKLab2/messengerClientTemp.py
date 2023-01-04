@@ -3,14 +3,6 @@
 import pickle
 import os
 
-from cryptography.exceptions import InvalidSignature
-from cryptography.hazmat.backends import default_backend
-from cryptography.hazmat.primitives import serialization
-from cryptography.hazmat.primitives.asymmetric import dh
-from cryptography.hazmat.primitives.asymmetric import ec
-from cryptography.hazmat.primitives import hashes
-
-
 class MessengerClient:
 
     def __init__(self, username, ca_pub_key):
@@ -41,18 +33,7 @@ class MessengerClient:
         će tako dobiveni certifikat biti proslijeđen drugim klijentima.
 
         """
-        parameters = dh.generate_parameters(generator=2, key_size=512)
-        private_key = parameters.generate_private_key()
-        public_key = private_key.public_key()
-        self.dh_key_pair = (private_key, public_key)
-
-        certificate = {
-            'username': self.username,
-            'public_key':
-                public_key.public_bytes(encoding=serialization.Encoding.PEM,
-                                        format=serialization.PublicFormat.SubjectPublicKeyInfo)
-        }
-        return certificate
+        raise NotImplementedError()
 
     def receive_certificate(self, cert, signature):
         """ Verificira certifikat klijenta i sprema informacije o klijentu (ime
@@ -69,15 +50,7 @@ class MessengerClient:
         spremljen prilikom inicijalizacije objekta.
 
         """
-        try:
-            self.ca_pub_key.verify(signature, pickle.dumps(cert), ec.ECDSA(hashes.SHA256()))
-        except InvalidSignature:
-            print("Invalid signature for certificate")
-            return
-
-        public_key = serialization.load_pem_public_key(cert['public_key'],
-                                                       backend=default_backend())
-        self.conns[cert['username']]['DHr'] = public_key
+        raise NotImplementedError()
 
     def send_message(self, username, message):
         """ Slanje poruke klijentu
@@ -136,3 +109,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+"""
+Write a messengerClient Python class which implements the Double Ratchet messaging algorithm. Use HKDF as the ratchet encryption. Use AESGCM for encrypting and decrypting messages, leave the aad argument empty, and generate the nonce randomly for each message. Send the nonce through the message's header so the receiver can decrypt it. At the start, generate a certificate object which contains the initial public Diffie-Hellman key. Sign the certificate object and distribute it to the clients, who will combine it with their private key to reach the shared secret - initial root key. Clients should not be able to decrypt out-of-order messages. Memory complexity should be O(1) - this means unused keys should be deleted. Here is the test class which your messengerClient example should fulfill: 
+"""
