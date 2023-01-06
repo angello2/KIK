@@ -9,6 +9,9 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import dh
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
+from cryptography.hazmat.primitives.kdf.hkdf import HKDF
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 
 class MessengerClient:
@@ -27,6 +30,7 @@ class MessengerClient:
         self.conns = {}
         # Inicijalni Diffie-Hellman par ključeva iz metode `generate_certificate`
         self.dh_key_pair = ()
+        self.salt = b"\xfd\xa4\xc3\x95\xd6\xaaE\x95\xb473\xc9\xec\x9c]\xb4"
 
     def generate_certificate(self):
         """ Generira par Diffie-Hellman ključeva i vraća certifikacijski objekt
@@ -41,16 +45,13 @@ class MessengerClient:
         će tako dobiveni certifikat biti proslijeđen drugim klijentima.
 
         """
-        parameters = dh.generate_parameters(generator=2, key_size=512)
-        private_key = parameters.generate_private_key()
-        public_key = private_key.public_key()
-        self.dh_key_pair = (private_key, public_key)
+        self.dh_key_pair = self.generate_dh()
 
         certificate = {
             'username': self.username,
             'public_key':
-                public_key.public_bytes(encoding=serialization.Encoding.PEM,
-                                        format=serialization.PublicFormat.SubjectPublicKeyInfo)
+                self.dh_key_pair[0].public_bytes(encoding=serialization.Encoding.PEM,
+                                                 format=serialization.PublicFormat.SubjectPublicKeyInfo)
         }
         return certificate
 
@@ -75,9 +76,52 @@ class MessengerClient:
             print("Invalid signature for certificate")
             return
 
-        public_key = serialization.load_pem_public_key(cert['public_key'],
-                                                       backend=default_backend())
-        self.conns[cert['username']]['DHr'] = public_key
+        conn_public_key = serialization.load_pem_public_key(cert['public_key'],
+                                                            backend=default_backend())
+
+        self.conns[cert['username']] = {'DHs': self.dh_key_pair, 'DHr': conn_public_key,
+                                        'RK': self.dh(self.dh_key_pair, conn_public_key), 'CKs': None,
+                                        'CKr': None}
+
+    def generate_dh(self):
+        dh_private_key = X25519PrivateKey.generate()
+        return dh_private_key.public_key(), dh_private_key
+
+    def dh(self, dh_key_pair, conn_public_key):
+        dh_out = dh_key_pair[1].exchange(conn_public_key)
+        return dh_out
+
+    def kdf_rk(self, rk, dh_out):
+        hkdf = HKDF(
+            algorithm=hashes.SHA256(),
+            length=32 * 2,
+            salt=dh_out,
+            info=None,
+            backend=default_backend()
+        )
+        output = hkdf.derive(rk)
+        return output[:32], output[32:]
+
+    def kdf_ck(self, ck):
+        hkdf = HKDF(
+            algorithm=hashes.SHA256(),
+            length=32 * 2,
+            salt=self.salt,
+            info=None,
+            backend=default_backend()
+        )
+        output = hkdf.derive(ck)
+        return output[:32], output[32:]
+
+    def encrypt(self, mk, plaintext, nonce):
+        aesgcm = AESGCM(mk)
+        cipher = aesgcm.encrypt(nonce, bytes(plaintext, 'utf-8'), None)
+        return cipher
+
+    def decrypt(self, mk, ciphertext, nonce):
+        aesgcm = AESGCM(mk)
+        plaintext = aesgcm.decrypt(nonce, ciphertext, None).decode('utf-8')
+        return plaintext
 
     def send_message(self, username, message):
         """ Slanje poruke klijentu
@@ -104,7 +148,21 @@ class MessengerClient:
         Metoda treba vratiti kriptiranu poruku zajedno sa zaglavljem.
 
         """
-        raise NotImplementedError()
+
+        # inicijalizacija
+        if self.conns[username]['CKs'] is None and self.conns[username]['CKr'] is None:
+            new_dh_key = self.generate_dh()
+            self.conns[username]['DHs'] = new_dh_key
+            rk, cks = self.kdf_rk(self.conns[username]['RK'], self.dh(new_dh_key, self.conns[username]['DHr']))
+            self.conns[username]['RK'] = rk
+            self.conns[username]['CKs'] = cks
+
+        self.conns[username]['CKs'], mk = self.kdf_ck(self.conns[username]['CKs'])
+
+        nonce = os.urandom(12)
+        header = {'DHr': self.conns[username]['DHs'][0], 'IV': nonce}
+        cipher = self.encrypt(mk, message, nonce)
+        return header, cipher
 
     def receive_message(self, username, message):
         """ Primanje poruke od korisnika
@@ -129,10 +187,26 @@ class MessengerClient:
         Metoda treba vratiti dekriptiranu poruku.
 
         """
-        raise NotImplementedError()
+        header, cipher = message[0], message[1]
+        if header['DHr'] != self.conns[username]['DHr']:
+            print('pozvan if u receive')
+            self.conns[username]['DHr'] = header['DHr']
+            self.conns[username]['RK'], self.conns[username]['CKr'] = self.kdf_rk(self.conns[username]['RK'],
+                                                                                  self.dh(self.conns[username]['DHs'],
+                                                                                          self.conns[username]['DHr']))
+            self.conns[username]['DHs'] = self.generate_dh()
+            self.conns[username]['RK'], self.conns[username]['CKs'] = self.kdf_rk(self.conns[username]['RK'],
+                                                                                  self.dh(self.conns[username]['DHs'],
+                                                                                          self.conns[username]['DHr']))
+
+        self.conns[username]['CKr'], mk = self.kdf_ck(self.conns[username]['CKr'])
+        nonce = header['IV']
+        plaintext = self.decrypt(mk, cipher, nonce)
+        return plaintext
 
 def main():
     pass
+
 
 if __name__ == "__main__":
     main()
